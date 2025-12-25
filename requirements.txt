@@ -1,0 +1,26 @@
+# NitroGen Fine-Tuning Dependencies
+# ==================================
+# For training NVIDIA NitroGen on coordinate regression
+
+# Core PyTorch (install separately for CUDA support)
+# pip install torch torchvision --index-url https://download.pytorch.org/whl/cu121
+torch>=2.0.0
+torchvision>=0.15.0
+
+# Vision & Image Processing
+opencv-python>=4.8.0
+Pillow>=10.0.0
+
+# Progress & Utilities
+tqdm>=4.65.0
+numpy>=1.24.0
+
+# GUI for labeling tool (usually pre-installed)
+# tkinter is part of Python standard library on Windows/macOS
+
+# Optional: For Hugging Face model loading
+# huggingface-hub>=0.19.0
+# transformers>=4.35.0
+
+# Development
+# pytest>=7.0.0
