@@ -43,19 +43,30 @@ class AverageMeter:
 class CheckpointManager:
     """
     Manages checkpoint saving and loading with timed auto-save.
-    Critical for Paperspace 6-hour timeout resilience.
+    Optimized for Paperspace 15GB storage limit.
+    
+    Strategy:
+    - Save checkpoints to /tmp (fast, unlimited)
+    - Sync only latest + best to /notebooks (persistent, limited)
+    - Delete old checkpoints aggressively
     """
     
     def __init__(
         self,
-        checkpoint_dir: Path,
+        temp_dir: Path,
+        persistent_dir: Path,
         save_interval_minutes: int = 30,
-        keep_last_n: int = 3
+        keep_last_n: int = 1,
+        sync_to_persistent: bool = True
     ):
-        self.checkpoint_dir = Path(checkpoint_dir)
-        self.checkpoint_dir.mkdir(parents=True, exist_ok=True)
+        self.temp_dir = Path(temp_dir)
+        self.persistent_dir = Path(persistent_dir)
+        self.temp_dir.mkdir(parents=True, exist_ok=True)
+        self.persistent_dir.mkdir(parents=True, exist_ok=True)
+        
         self.save_interval_minutes = save_interval_minutes
         self.keep_last_n = keep_last_n
+        self.sync_to_persistent = sync_to_persistent
         self.last_save_time = time.time()
         self.logger = logging.getLogger(__name__)
     
@@ -77,22 +88,10 @@ class CheckpointManager:
         extra_info: Dict = None
     ) -> Path:
         """
-        Save training checkpoint.
-        
-        Args:
-            model: PyTorch model
-            optimizer: Optimizer state
-            scheduler: LR scheduler state
-            epoch: Current epoch
-            step: Global step
-            loss: Current loss
-            best_loss: Best loss so far
-            is_best: Whether this is the best model
-            extra_info: Additional metadata
-        
-        Returns:
-            Path to saved checkpoint
+        Save training checkpoint to temp, sync to persistent.
         """
+        import shutil
+        
         checkpoint = {
             'epoch': epoch,
             'step': step,
@@ -105,38 +104,29 @@ class CheckpointManager:
             'extra_info': extra_info or {}
         }
         
-        # Save latest checkpoint
-        latest_path = self.checkpoint_dir / 'checkpoint_latest.pth'
-        torch.save(checkpoint, latest_path)
-        self.logger.info(f"Saved checkpoint to {latest_path}")
+        # Save to temp directory (fast)
+        latest_temp = self.temp_dir / 'checkpoint_latest.pth'
+        torch.save(checkpoint, latest_temp)
+        self.logger.info(f"Saved checkpoint to {latest_temp}")
         
-        # Save epoch checkpoint
-        epoch_path = self.checkpoint_dir / f'checkpoint_epoch_{epoch:04d}.pth'
-        torch.save(checkpoint, epoch_path)
+        # Sync to persistent storage
+        if self.sync_to_persistent:
+            latest_persistent = self.persistent_dir / 'checkpoint_latest.pth'
+            shutil.copy2(latest_temp, latest_persistent)
+            self.logger.info(f"Synced to {latest_persistent}")
         
         # Save best model
         if is_best:
-            best_path = self.checkpoint_dir / 'best_model.pth'
-            torch.save(checkpoint, best_path)
-            self.logger.info(f"New best model saved with loss: {loss:.6f}")
-        
-        # Cleanup old checkpoints
-        self._cleanup_old_checkpoints()
+            best_temp = self.temp_dir / 'best_model.pth'
+            torch.save(checkpoint, best_temp)
+            
+            if self.sync_to_persistent:
+                best_persistent = self.persistent_dir / 'best_model.pth'
+                shutil.copy2(best_temp, best_persistent)
+                self.logger.info(f"New best model synced to {best_persistent}")
         
         self.last_save_time = time.time()
-        return latest_path
-    
-    def _cleanup_old_checkpoints(self):
-        """Remove old epoch checkpoints, keeping only the last N."""
-        epoch_checkpoints = sorted(
-            self.checkpoint_dir.glob('checkpoint_epoch_*.pth'),
-            key=lambda x: x.stat().st_mtime,
-            reverse=True
-        )
-        
-        for ckpt in epoch_checkpoints[self.keep_last_n:]:
-            ckpt.unlink()
-            self.logger.debug(f"Removed old checkpoint: {ckpt}")
+        return latest_temp
     
     def load_checkpoint(
         self,
@@ -146,35 +136,29 @@ class CheckpointManager:
         checkpoint_path: Optional[Path] = None
     ) -> Dict[str, Any]:
         """
-        Load checkpoint and restore training state.
-        
-        Args:
-            model: Model to load weights into
-            optimizer: Optimizer to restore state
-            scheduler: Scheduler to restore state
-            checkpoint_path: Specific checkpoint path (default: latest)
-        
-        Returns:
-            Dictionary with epoch, step, and other metadata
+        Load checkpoint - tries persistent first, then temp.
         """
         if checkpoint_path is None:
-            checkpoint_path = self.checkpoint_dir / 'checkpoint_latest.pth'
-        
-        if not checkpoint_path.exists():
-            self.logger.warning(f"No checkpoint found at {checkpoint_path}")
-            return {'epoch': 0, 'step': 0, 'best_loss': float('inf')}
+            # Try persistent first (survives restart)
+            persistent_path = self.persistent_dir / 'checkpoint_latest.pth'
+            temp_path = self.temp_dir / 'checkpoint_latest.pth'
+            
+            if persistent_path.exists():
+                checkpoint_path = persistent_path
+            elif temp_path.exists():
+                checkpoint_path = temp_path
+            else:
+                self.logger.warning("No checkpoint found")
+                return {'epoch': 0, 'step': 0, 'best_loss': float('inf')}
         
         self.logger.info(f"Loading checkpoint from {checkpoint_path}")
         checkpoint = torch.load(checkpoint_path, map_location='cpu')
         
-        # Load model weights
         model.load_state_dict(checkpoint['model_state_dict'])
         
-        # Load optimizer state
         if optimizer is not None and 'optimizer_state_dict' in checkpoint:
             optimizer.load_state_dict(checkpoint['optimizer_state_dict'])
         
-        # Load scheduler state
         if scheduler is not None and checkpoint.get('scheduler_state_dict'):
             scheduler.load_state_dict(checkpoint['scheduler_state_dict'])
         
@@ -192,8 +176,11 @@ class CheckpointManager:
         }
     
     def has_checkpoint(self) -> bool:
-        """Check if a checkpoint exists."""
-        return (self.checkpoint_dir / 'checkpoint_latest.pth').exists()
+        """Check if a checkpoint exists (persistent or temp)."""
+        return (
+            (self.persistent_dir / 'checkpoint_latest.pth').exists() or
+            (self.temp_dir / 'checkpoint_latest.pth').exists()
+        )
 
 
 def setup_logging(

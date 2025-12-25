@@ -64,15 +64,19 @@ class TrainingConfig:
 @dataclass
 class CheckpointConfig:
     """Checkpointing configuration for 6-hour timeout resilience."""
-    # Paths
-    checkpoint_dir: Path = Path("/storage/checkpoints")
+    # Paths - use temp for training, persistent for final save
+    temp_checkpoint_dir: Path = Path("/tmp/checkpoints")  # Fast, temporary
+    persistent_dir: Path = Path("/notebooks/checkpoints")  # Survives restart, limited space
     best_model_name: str = "best_model.pth"
     latest_checkpoint_name: str = "checkpoint_latest.pth"
     
     # Timing (critical for Paperspace 6-hour limit)
     save_interval_minutes: int = 30  # Save every 30 minutes
     save_every_epoch: bool = True
-    keep_last_n: int = 3  # Keep last N checkpoints
+    keep_last_n: int = 1  # Keep only 1 checkpoint to save space
+    
+    # Auto-sync to persistent storage
+    sync_to_persistent: bool = True  # Copy latest to /notebooks/ after each save
     
     # Resume
     auto_resume: bool = True

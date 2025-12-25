@@ -89,11 +89,13 @@ class Trainer:
         # Mixed precision scaler
         self.scaler = GradScaler() if config.training.use_amp else None
         
-        # Checkpoint manager
+        # Checkpoint manager - saves to temp, syncs to persistent
         self.checkpoint_manager = CheckpointManager(
-            checkpoint_dir=config.checkpoint.checkpoint_dir,
+            temp_dir=config.checkpoint.temp_checkpoint_dir,
+            persistent_dir=config.checkpoint.persistent_dir,
             save_interval_minutes=config.checkpoint.save_interval_minutes,
-            keep_last_n=config.checkpoint.keep_last_n
+            keep_last_n=config.checkpoint.keep_last_n,
+            sync_to_persistent=config.checkpoint.sync_to_persistent
         )
         
         # Training state
