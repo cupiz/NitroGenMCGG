@@ -17,10 +17,10 @@ class ModelConfig:
     image_size: int = 256
     in_channels: int = 3
     
-    # Vision encoder (SigLip2-based)
-    vision_hidden_dim: int = 768
-    vision_num_layers: int = 12
-    vision_num_heads: int = 12
+    # Vision encoder (matching ng.pt)
+    vision_hidden_dim: int = 1024  # ng.pt uses 1024, not 768
+    vision_num_layers: int = 27    # ng.pt has 27 layers
+    vision_num_heads: int = 16     # 1024 / 64 = 16 heads
     vision_patch_size: int = 16
     
     # Coordinate head settings

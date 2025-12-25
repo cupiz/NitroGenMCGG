@@ -389,48 +389,124 @@ def load_pretrained_weights(
         raise FileNotFoundError(f"Checkpoint not found: {checkpoint_path}")
     
     # Load checkpoint
-    state_dict = torch.load(checkpoint_path, map_location='cpu')
+    checkpoint = torch.load(checkpoint_path, map_location='cpu')
     
-    # Handle different checkpoint formats
-    if 'model_state_dict' in state_dict:
-        state_dict = state_dict['model_state_dict']
-    elif 'state_dict' in state_dict:
-        state_dict = state_dict['state_dict']
+    # ng.pt has weights in checkpoint['model']
+    if 'model' in checkpoint:
+        pretrained_state = checkpoint['model']
+    elif 'model_state_dict' in checkpoint:
+        pretrained_state = checkpoint['model_state_dict']
+    elif 'state_dict' in checkpoint:
+        pretrained_state = checkpoint['state_dict']
+    else:
+        pretrained_state = checkpoint
     
-    # Try to match keys between pretrained and our model
+    # Build mapping from ng.pt keys to our model keys
+    # ng.pt format: vision_encoder.embeddings.patch_embedding.weight
+    # our format:   vision_encoder.patch_embed.projection.weight
+    
+    key_mapping = {
+        # Patch embedding
+        'vision_encoder.embeddings.patch_embedding.weight': 'vision_encoder.patch_embed.projection.weight',
+        'vision_encoder.embeddings.patch_embedding.bias': 'vision_encoder.patch_embed.projection.bias',
+        'vision_encoder.embeddings.position_embedding.weight': 'vision_encoder.patch_embed.position_embeddings',
+    }
+    
+    # Add transformer layer mappings
+    # ng.pt: vision_encoder.encoder.layers.{i}.layer_norm1.weight
+    # ours:  vision_encoder.blocks.{i}.norm1.weight
+    num_layers = len(model.vision_encoder.blocks)
+    for i in range(num_layers):
+        prefix_src = f'vision_encoder.encoder.layers.{i}'
+        prefix_dst = f'vision_encoder.blocks.{i}'
+        
+        key_mapping.update({
+            f'{prefix_src}.layer_norm1.weight': f'{prefix_dst}.norm1.weight',
+            f'{prefix_src}.layer_norm1.bias': f'{prefix_dst}.norm1.bias',
+            f'{prefix_src}.layer_norm2.weight': f'{prefix_dst}.norm2.weight',
+            f'{prefix_src}.layer_norm2.bias': f'{prefix_dst}.norm2.bias',
+            # Attention - need to handle q,k,v separately
+            f'{prefix_src}.self_attn.q_proj.weight': f'{prefix_dst}.attn.in_proj_weight_q',
+            f'{prefix_src}.self_attn.q_proj.bias': f'{prefix_dst}.attn.in_proj_bias_q',
+            f'{prefix_src}.self_attn.k_proj.weight': f'{prefix_dst}.attn.in_proj_weight_k',
+            f'{prefix_src}.self_attn.k_proj.bias': f'{prefix_dst}.attn.in_proj_bias_k',
+            f'{prefix_src}.self_attn.v_proj.weight': f'{prefix_dst}.attn.in_proj_weight_v',
+            f'{prefix_src}.self_attn.v_proj.bias': f'{prefix_dst}.attn.in_proj_bias_v',
+            f'{prefix_src}.self_attn.out_proj.weight': f'{prefix_dst}.attn.out_proj.weight',
+            f'{prefix_src}.self_attn.out_proj.bias': f'{prefix_dst}.attn.out_proj.bias',
+        })
+        
+        # MLP mappings
+        key_mapping.update({
+            f'{prefix_src}.mlp.fc1.weight': f'{prefix_dst}.mlp.0.weight',
+            f'{prefix_src}.mlp.fc1.bias': f'{prefix_dst}.mlp.0.bias',
+            f'{prefix_src}.mlp.fc2.weight': f'{prefix_dst}.mlp.3.weight',
+            f'{prefix_src}.mlp.fc2.bias': f'{prefix_dst}.mlp.3.bias',
+        })
+    
+    # Final norm
+    key_mapping['vision_encoder.post_layernorm.weight'] = 'vision_encoder.norm.weight'
+    key_mapping['vision_encoder.post_layernorm.bias'] = 'vision_encoder.norm.bias'
+    
+    # Load weights with mapping
     model_state = model.state_dict()
     matched_state = {}
-    missing_keys = []
-    unexpected_keys = list(state_dict.keys())
+    loaded_count = 0
     
-    for key in model_state.keys():
-        if key in state_dict:
-            matched_state[key] = state_dict[key]
-            unexpected_keys.remove(key)
+    for src_key, tensor in pretrained_state.items():
+        if not src_key.startswith('vision_encoder'):
+            continue  # Skip non-vision keys
+            
+        if src_key in key_mapping:
+            dst_key = key_mapping[src_key]
+            if dst_key in model_state:
+                if model_state[dst_key].shape == tensor.shape:
+                    matched_state[dst_key] = tensor
+                    loaded_count += 1
         else:
-            # Try to find matching key with different prefix
-            for pretrained_key in state_dict.keys():
-                if pretrained_key.endswith(key) or key.endswith(pretrained_key):
-                    matched_state[key] = state_dict[pretrained_key]
-                    if pretrained_key in unexpected_keys:
-                        unexpected_keys.remove(pretrained_key)
-                    break
-            else:
-                missing_keys.append(key)
+            # Try direct match
+            if src_key in model_state:
+                if model_state[src_key].shape == tensor.shape:
+                    matched_state[src_key] = tensor
+                    loaded_count += 1
+    
+    # Handle MultiheadAttention in_proj_weight merging (q,k,v -> single tensor)
+    for i in range(num_layers):
+        prefix_src = f'vision_encoder.encoder.layers.{i}'
+        prefix_dst = f'vision_encoder.blocks.{i}'
+        
+        q_key = f'{prefix_src}.self_attn.q_proj.weight'
+        k_key = f'{prefix_src}.self_attn.k_proj.weight'
+        v_key = f'{prefix_src}.self_attn.v_proj.weight'
+        
+        if all(k in pretrained_state for k in [q_key, k_key, v_key]):
+            q = pretrained_state[q_key]
+            k = pretrained_state[k_key]
+            v = pretrained_state[v_key]
+            in_proj_weight = torch.cat([q, k, v], dim=0)
+            matched_state[f'{prefix_dst}.attn.in_proj_weight'] = in_proj_weight
+            loaded_count += 1
+        
+        q_bias_key = f'{prefix_src}.self_attn.q_proj.bias'
+        k_bias_key = f'{prefix_src}.self_attn.k_proj.bias'
+        v_bias_key = f'{prefix_src}.self_attn.v_proj.bias'
+        
+        if all(k in pretrained_state for k in [q_bias_key, k_bias_key, v_bias_key]):
+            q_b = pretrained_state[q_bias_key]
+            k_b = pretrained_state[k_bias_key]
+            v_b = pretrained_state[v_bias_key]
+            in_proj_bias = torch.cat([q_b, k_b, v_b], dim=0)
+            matched_state[f'{prefix_dst}.attn.in_proj_bias'] = in_proj_bias
+            loaded_count += 1
     
     # Load matched weights
-    model.load_state_dict(matched_state, strict=False)
+    missing = model.load_state_dict(matched_state, strict=False)
     
-    logger.info(f"Loaded {len(matched_state)} weight tensors")
-    logger.info(f"Missing keys: {len(missing_keys)}")
-    logger.info(f"Unexpected keys: {len(unexpected_keys)}")
+    logger.info(f"Loaded {loaded_count} weight tensors from ng.pt")
+    logger.info(f"Missing keys: {len(missing.missing_keys)}")
+    logger.info(f"Unexpected keys: {len(missing.unexpected_keys)}")
     
-    if missing_keys:
-        logger.debug(f"Missing: {missing_keys[:10]}...")
-    if unexpected_keys:
-        logger.debug(f"Unexpected: {unexpected_keys[:10]}...")
-    
-    return missing_keys, unexpected_keys
+    return missing.missing_keys, missing.unexpected_keys
 
 
 def create_model(

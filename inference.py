@@ -83,18 +83,24 @@ class GameAgent:
         """Load trained model from checkpoint."""
         logger.info(f"Loading model from {model_path}")
         
-        model = create_model(freeze_encoder=True)
-        
+        # Load checkpoint first to check it
         checkpoint = torch.load(model_path, map_location='cpu')
-        if 'model_state_dict' in checkpoint:
-            model.load_state_dict(checkpoint['model_state_dict'])
-        else:
-            model.load_state_dict(checkpoint)
+        
+        if 'model_state_dict' not in checkpoint:
+            raise ValueError(f"Invalid checkpoint: missing 'model_state_dict'")
+        
+        logger.info(f"Checkpoint info - Epoch: {checkpoint.get('epoch')}, Loss: {checkpoint.get('best_loss', 'N/A')}")
+        
+        # Create model architecture
+        model = create_model(freeze_encoder=False)  # Don't freeze, we load all weights
+        
+        # Load trained weights
+        model.load_state_dict(checkpoint['model_state_dict'], strict=True)
+        logger.info("Trained weights loaded successfully!")
         
         model = model.to(self.device)
         model.eval()
         
-        logger.info("Model loaded successfully")
         return model
     
     def capture_screen(self) -> Image.Image:
