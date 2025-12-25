@@ -122,7 +122,8 @@ class Config:
     
     def __post_init__(self):
         """Create directories if they don't exist."""
-        self.checkpoint.checkpoint_dir.mkdir(parents=True, exist_ok=True)
+        self.checkpoint.temp_checkpoint_dir.mkdir(parents=True, exist_ok=True)
+        self.checkpoint.persistent_dir.mkdir(parents=True, exist_ok=True)
         self.log_dir.mkdir(parents=True, exist_ok=True)
         self.data.video_dir.mkdir(parents=True, exist_ok=True)
         self.data.data_dir.mkdir(parents=True, exist_ok=True)
